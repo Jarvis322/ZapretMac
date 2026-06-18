@@ -1,52 +1,60 @@
 # Zapret Manager for macOS
 
-Zapret Manager, mevcut `/opt/zapret` kurulumunu güvenli bir macOS arayüzünden yönetir.
+A native macOS app for installing and managing [Zapret](https://github.com/bol-van/zapret) — a tool that helps bypass DPI-based censorship. Zapret Manager wraps the command-line setup in a simple graphical interface: install, start, stop, edit the target domain list, and remove it again, all without touching a terminal.
 
-## Özellikler
+> **Requires an Apple Silicon (M1 or later) Mac running macOS 14 (Sonoma) or newer.** Intel Macs are not supported.
 
-- Zapret kurulu değilse resmi GitHub sürümünü indirir ve indirilen tüm dosyaları `sha256sum.txt` ile doğrulayarak kurar.
-- Zapret ve `tpws` durumunu gösterir.
-- Başlatma, durdurma ve yeniden başlatma işlemlerini yönetici onayıyla yapar.
-- Hedefli hostlist düzenler ve her kayıttan önce zaman damgalı yedek oluşturur.
-- Discord için hazır alan adı profili sunar; diğer alan adlarını kullanıcı kendisi ekler.
-- Discord, OpenAI, Anthropic ve GitHub bağlantılarını test eder.
-- Kullanıcı girdisini kabuk komutuna eklemeden önce alan adı olarak doğrular.
+## Features
 
-## Derleme
+- **One-click install.** Downloads the official Zapret release from GitHub, verifies every file against its `sha256sum.txt` checksum, and installs it to `/opt/zapret`.
+- **Password-free control.** After a single administrator approval at install time, starting, stopping, and saving no longer prompt for your password (see [How privileges work](#how-privileges-work)).
+- **Self-healing.** A lightweight watchdog restarts `tpws` automatically if it ever crashes, so your connection is never left half-broken (see [Resilience](#resilience)).
+- **Domain list editor.** Edit the list of domains to route through Zapret. Every save is backed up with a timestamp, and there is a built-in Discord profile to get started quickly.
+- **Connection tests.** Check reachability of Discord, OpenAI, Anthropic, and GitHub from inside the app.
+- **Clean uninstall.** Removes everything it installed, restoring your system to its original state.
+
+## Installation
+
+1. Download `Zapret Manager.dmg` from the [latest release](https://github.com/Jarvis322/ZapretMac/releases/latest).
+2. Open the DMG and drag **Zapret Manager** into your **Applications** folder.
+3. Launch it (see [First launch](#first-launch) below), then click **Install Zapret**. The app downloads, verifies, and configures Zapret for you.
+
+### First launch
+
+The app is not signed with an Apple Developer ID, so macOS blocks it the first time you open it. This is expected and only happens once:
+
+1. **Right-click** the app and choose **Open**, then confirm **Open** in the dialog that appears.
+2. If it is still blocked, go to **System Settings → Privacy & Security**, scroll to the bottom, and click **Open Anyway** next to the Zapret Manager notice.
+
+## How it works
+
+Zapret runs `tpws`, a transparent proxy, and uses the macOS packet filter (PF) to route selected traffic through it. Zapret Manager handles the moving parts around that:
+
+### How privileges work
+
+Installing, starting, and stopping Zapret require root access. Rather than asking for your password every time, the app installs a small root-owned helper script and a tightly scoped `sudoers` rule **once**, during the initial admin-approved install. From then on, routine actions run without a prompt.
+
+This is a deliberate trade-off: anyone who can run the app on this Mac can run these specific Zapret commands as root without a password. That is appropriate for a single-user machine and keeps everyday use friction-free.
+
+### Resilience
+
+If `tpws` stops unexpectedly — a crash, or coming back from sleep — the leftover PF redirect would otherwise send all HTTPS traffic to a process that is no longer there, cutting off your connection. To prevent this, a watchdog `LaunchDaemon` (`zapret-watchdog`) checks `tpws` every ~10 seconds and restarts it whenever protection is supposed to be on but the process is gone. If you stopped protection yourself, the watchdog leaves it alone.
+
+### Uninstall
+
+The **Uninstall Zapret** button in the app removes everything: `/opt/zapret`, the auto-start `LaunchDaemon`, the watchdog, and the `sudoers` rule. It unapplies the PF firewall first, so your connection is never left in a broken state.
+
+## Building from source
 
 ```sh
-./build_app.sh          # yalnızca .app
-./build_app.sh --dmg    # .app + dağıtılabilir .dmg
+./build_app.sh          # build the .app only
+./build_app.sh --dmg    # build the .app and a distributable .dmg
 ```
 
-Çıktılar: `dist/Zapret Manager.app` ve (`--dmg` ile) `dist/Zapret Manager.dmg`.
+Outputs land in `dist/`: `Zapret Manager.app` and, with `--dmg`, `Zapret Manager.dmg`. The app icon is generated on every build by `Icon/make_icon.swift` and embedded in the bundle. The DMG ships with the app and an `Applications` shortcut for drag-to-install.
 
-Uygulama simgesi `Icon/make_icon.swift` ile her derlemede üretilir ve pakete gömülür.
-DMG, sürükle-bırak kurulum için uygulamayı ve `Applications` kısayolunu içerir.
+Requires the Swift toolchain (Xcode or Xcode Command Line Tools).
 
-## Gereksinimler
+## Project status
 
-- **Apple Silicon (M1 ve sonrası) Mac.** Uygulama yalnızca `arm64` derlenir; Intel Mac'ler desteklenmez.
-- macOS 14 (Sonoma) veya üzeri.
-
-## İlk açılış (Gatekeeper)
-
-Uygulama Developer ID ile imzalanıp notarize edilmediği için, indirildikten sonra macOS ilk açılışı engeller. Açmak için:
-
-1. `Zapret Manager.app`'i **Applications**'a sürükleyin.
-2. Uygulamaya **sağ tıklayın → Aç**, sonra çıkan uyarıda tekrar **Aç**'a basın.
-3. Engellenirse: **Sistem Ayarları → Gizlilik ve Güvenlik** → en altta "Zapret Manager engellendi" satırının yanındaki **Yine de Aç**'a basın.
-
-Bu yalnızca ilk açılışta gereklidir.
-
-## Dayanıklılık (watchdog)
-
-tpws beklenmedik şekilde sonlanırsa (çökme, uyku/uyanma) PF yönlendirmesi nedeniyle tüm HTTPS kopabilir. Bunu önlemek için bir watchdog LaunchDaemon (`zapret-watchdog`) tpws'i ~10 saniyede bir izler ve koruma açık olması gerekirken (istenen-durum bayrağı) tpws ölmüşse otomatik yeniden başlatır. Kullanıcı korumayı bilerek durdurduysa watchdog dokunmaz.
-
-## Kaldırma
-
-Uygulamadaki sol paneldeki **Zapret’i Kaldır** düğmesi; `/opt/zapret`, LaunchDaemon (otomatik başlatma), watchdog ve sudoers (şifresiz erişim) kuralını tamamen siler.
-
-## Mevcut sınır
-
-Sürüm 0.2 sıfırdan kurulum, kaldırma ve kalıcı LaunchDaemon kaydı yapabilir. Geniş dağıtım için güncelleme, Developer ID imzası ve notarization ayrıca eklenebilir.
+Version 0.2.1 supports clean install, uninstall, persistent auto-start, password-free control, and automatic recovery. For broad public distribution, an in-app updater plus a Developer ID signature and notarization would remove the first-launch security prompt — these are not yet included.
