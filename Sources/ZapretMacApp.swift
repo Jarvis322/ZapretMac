@@ -2,6 +2,22 @@ import AppKit
 import Foundation
 import SwiftUI
 
+// MARK: - Yerelleştirme / Localization
+
+enum Lang: String { case tr, en }
+
+enum AppLang {
+    static let key = "appLanguage"
+    /// Kayıtlı dil; yoksa sistem diline göre (Türkçe → tr, aksi halde en).
+    static var current: Lang {
+        if let raw = UserDefaults.standard.string(forKey: key), let l = Lang(rawValue: raw) { return l }
+        return (Locale.preferredLanguages.first ?? "en").lowercased().hasPrefix("tr") ? .tr : .en
+    }
+}
+
+/// İki dilli metin seçici. / Bilingual string picker.
+private func L(_ tr: String, _ en: String) -> String { AppLang.current == .tr ? tr : en }
+
 private enum ZapretPaths {
     static let base = "/opt/zapret"
     static let executable = "/opt/zapret/init.d/macos/zapret"
@@ -50,7 +66,7 @@ private final class ZapretManager: ObservableObject {
     @Published var isRunning = false
     @Published var isAutoStartEnabled = false
     @Published var domains = ""
-    @Published var message = "Hazır"
+    @Published var message = L("Hazır", "Ready")
     @Published var isBusy = false
     @Published var checks: [EndpointCheck] = []
 
@@ -74,24 +90,26 @@ private final class ZapretManager: ObservableObject {
 
     func addDiscordPreset() { addPreset(discordPreset) }
 
-    func start() { performServiceAction("start", success: "Zapret başlatıldı") }
-    func stop() { performServiceAction("stop", success: "Zapret durduruldu") }
-    func restart() { performServiceAction("restart", success: "Zapret yeniden başlatıldı") }
+    func start() { performServiceAction("start", success: L("Zapret başlatıldı", "Zapret started")) }
+    func stop() { performServiceAction("stop", success: L("Zapret durduruldu", "Zapret stopped")) }
+    func restart() { performServiceAction("restart", success: L("Zapret yeniden başlatıldı", "Zapret restarted")) }
 
     func installZapret() {
         guard !isInstalled else {
-            message = "Zapret zaten kurulu"
+            message = L("Zapret zaten kurulu", "Zapret is already installed")
             return
         }
         isBusy = true
-        message = "Resmi Zapret paketi indiriliyor ve doğrulanıyor..."
+        message = L("Resmi Zapret paketi indiriliyor ve doğrulanıyor...",
+                    "Downloading and verifying the official Zapret package…")
 
         Task {
             var temporaryDirectory: URL?
             do {
                 let prepared = try await Self.prepareInstallerPayload()
                 temporaryDirectory = prepared.temporaryDirectory
-                message = "Zapret kuruluyor; yönetici onayı gerekiyor..."
+                message = L("Zapret kuruluyor; yönetici onayı gerekiyor...",
+                            "Installing Zapret; administrator approval required…")
                 let source = Self.shellQuote(prepared.sourceDirectory.path)
                 let staged = try Self.stageHelperPayload(in: prepared.temporaryDirectory)
                 let command = "set -e; "
@@ -110,9 +128,11 @@ private final class ZapretManager: ObservableObject {
                     + ": > \(ZapretPaths.protectFlag); "   // koruma açık: watchdog tpws'i diri tutsun
                     + Self.helperInstallSnippet(staged: staged)
                 _ = try await Task.detached { try Self.runAdministratorCommandInline(command) }.value
-                message = "Zapret \(prepared.version) kuruldu ve otomatik başlatma etkinleştirildi"
+                message = L("Zapret \(prepared.version) kuruldu ve otomatik başlatma etkinleştirildi",
+                            "Zapret \(prepared.version) installed and auto-start enabled")
             } catch {
-                message = "Kurulum başarısız: \(error.localizedDescription)"
+                message = L("Kurulum başarısız: \(error.localizedDescription)",
+                            "Installation failed: \(error.localizedDescription)")
             }
             if let temporaryDirectory {
                 try? FileManager.default.removeItem(at: temporaryDirectory)
@@ -128,7 +148,8 @@ private final class ZapretManager: ObservableObject {
 
     func uninstall() {
         isBusy = true
-        message = "Zapret kaldırılıyor; yönetici onayı gerekiyor..."
+        message = L("Zapret kaldırılıyor; yönetici onayı gerekiyor...",
+                    "Removing Zapret; administrator approval required…")
         Task {
             do {
                 // ÖNEMLİ: Dosyaları silmeden önce `zapret stop` çalıştırılmalı; bu, PF firewall
@@ -158,9 +179,10 @@ private final class ZapretManager: ObservableObject {
                 _ = try await Task.detached { try Self.runAdministratorCommandInline(command) }.value
                 domains = ""
                 checks = []
-                message = "Zapret tamamen kaldırıldı"
+                message = L("Zapret tamamen kaldırıldı", "Zapret completely removed")
             } catch {
-                message = "Kaldırma başarısız: \(error.localizedDescription)"
+                message = L("Kaldırma başarısız: \(error.localizedDescription)",
+                            "Removal failed: \(error.localizedDescription)")
             }
             isBusy = false
             refresh()
@@ -170,16 +192,17 @@ private final class ZapretManager: ObservableObject {
     func saveDomains() {
         let result = Self.validatedDomains(from: domains)
         guard result.invalid.isEmpty else {
-            message = "Geçersiz alan adı: \(result.invalid.joined(separator: ", "))"
+            message = L("Geçersiz alan adı: \(result.invalid.joined(separator: ", "))",
+                        "Invalid domain: \(result.invalid.joined(separator: ", "))")
             return
         }
         guard !result.valid.isEmpty else {
-            message = "Hostlist boş bırakılamaz"
+            message = L("Hostlist boş bırakılamaz", "The domain list can’t be empty")
             return
         }
 
         isBusy = true
-        message = "Alan adları kaydediliyor..."
+        message = L("Alan adları kaydediliyor...", "Saving domains…")
         let contents = result.valid.joined(separator: "\n") + "\n"
 
         Task {
@@ -196,9 +219,11 @@ private final class ZapretManager: ObservableObject {
                 _ = try await Self.runPrivileged(helperArgs: ["apply-hostlist", temporaryURL.path])
                 try? FileManager.default.removeItem(at: stagingDirectory)
                 domains = result.valid.joined(separator: "\n")
-                message = "Hostlist kaydedildi ve Zapret yeniden başlatıldı"
+                message = L("Hostlist kaydedildi ve Zapret yeniden başlatıldı",
+                            "Domain list saved and Zapret restarted")
             } catch {
-                message = "Kaydetme başarısız: \(error.localizedDescription)"
+                message = L("Kaydetme başarısız: \(error.localizedDescription)",
+                            "Save failed: \(error.localizedDescription)")
             }
             isBusy = false
             refreshStatusOnly()
@@ -208,7 +233,7 @@ private final class ZapretManager: ObservableObject {
     func runDiagnostics() {
         isBusy = true
         checks = []
-        message = "Bağlantılar test ediliyor..."
+        message = L("Bağlantılar test ediliyor...", "Testing connections…")
         Task {
             let targets = [
                 ("Discord", "https://discord.com/api/v10/gateway", [200]),
@@ -221,12 +246,14 @@ private final class ZapretManager: ObservableObject {
                 let code = await Self.httpStatus(for: target.1)
                 output.append(EndpointCheck(
                     name: target.0,
-                    result: code == 0 ? "Bağlantı kurulamadı" : "HTTP \(code)",
+                    result: code == 0 ? L("Bağlantı kurulamadı", "Unreachable") : "HTTP \(code)",
                     succeeded: target.2.contains(code)
                 ))
             }
             checks = output
-            message = output.allSatisfy(\ .succeeded) ? "Tüm bağlantılar sağlıklı" : "Bazı bağlantılar başarısız"
+            message = output.allSatisfy(\ .succeeded)
+                ? L("Tüm bağlantılar sağlıklı", "All connections healthy")
+                : L("Bazı bağlantılar başarısız", "Some connections failed")
             isBusy = false
             refreshStatusOnly()
         }
@@ -236,19 +263,21 @@ private final class ZapretManager: ObservableObject {
         var current = Set(domains.split(whereSeparator: \ .isNewline).map(String.init))
         current.formUnion(preset)
         domains = current.sorted().joined(separator: "\n")
-        message = "Profil editöre eklendi; uygulamak için Kaydet'e basın"
+        message = L("Profil editöre eklendi; uygulamak için Kaydet'e basın",
+                    "Profile added to the editor; press Save to apply")
     }
 
     private func performServiceAction(_ action: String, success: String) {
         guard ["start", "stop", "restart"].contains(action) else { return }
         isBusy = true
-        message = "İşlem yapılıyor..."
+        message = L("İşlem yapılıyor...", "Working…")
         Task {
             do {
                 _ = try await Self.runPrivileged(helperArgs: [action])
                 message = success
             } catch {
-                message = "İşlem başarısız: \(error.localizedDescription)"
+                message = L("İşlem başarısız: \(error.localizedDescription)",
+                            "Operation failed: \(error.localizedDescription)")
             }
             isBusy = false
             refreshStatusOnly()
@@ -692,17 +721,17 @@ private enum Protection {
 
     var title: String {
         switch self {
-        case .notInstalled: return "Kurulu Değil"
-        case .running:      return "Korunuyor"
-        case .stopped:      return "Kapalı"
+        case .notInstalled: return L("Kurulu Değil", "Not Installed")
+        case .running:      return L("Korunuyor", "Protected")
+        case .stopped:      return L("Kapalı", "Off")
         }
     }
 
     var subtitle: String {
         switch self {
-        case .notInstalled: return "Başlamak için Zapret’i kur"
-        case .running:      return "tpws etkin · trafik filtreleniyor"
-        case .stopped:      return "Koruma şu an devre dışı"
+        case .notInstalled: return L("Başlamak için Zapret’i kur", "Install Zapret to get started")
+        case .running:      return L("tpws etkin · trafik filtreleniyor", "tpws active · filtering traffic")
+        case .stopped:      return L("Koruma şu an devre dışı", "Protection is currently off")
         }
     }
 
@@ -850,6 +879,8 @@ private struct Card<Content: View>: View {
 private struct ContentView: View {
     @StateObject private var manager = ZapretManager()
     @State private var confirmUninstall = false
+    // Dil değişince tüm L(...) çağrıları yeniden değerlenir (body yeniden çizilir).
+    @AppStorage(AppLang.key) private var langRaw = AppLang.current.rawValue
 
     private var state: Protection {
         guard manager.isInstalled else { return .notInstalled }
@@ -863,24 +894,49 @@ private struct ContentView: View {
         }
         .frame(minWidth: 780, minHeight: 600)
         .preferredColorScheme(.dark)
-        .confirmationDialog("Zapret tamamen kaldırılsın mı?", isPresented: $confirmUninstall, titleVisibility: .visible) {
-            Button("Kaldır", role: .destructive) { manager.uninstall() }
-            Button("Vazgeç", role: .cancel) {}
+        .confirmationDialog(L("Zapret tamamen kaldırılsın mı?", "Remove Zapret completely?"),
+                            isPresented: $confirmUninstall, titleVisibility: .visible) {
+            Button(L("Kaldır", "Remove"), role: .destructive) { manager.uninstall() }
+            Button(L("Vazgeç", "Cancel"), role: .cancel) {}
         } message: {
-            Text("/opt/zapret, açılışta otomatik başlatma ve şifresiz erişim kuralı kaldırılır.")
+            Text(L("/opt/zapret, açılışta otomatik başlatma ve şifresiz erişim kuralı kaldırılır.",
+                   "Removes /opt/zapret, auto-start at login, and the password-free access rule."))
         }
+    }
+
+    // TR / EN değiştirici.
+    private var languageToggle: some View {
+        HStack(spacing: 0) {
+            ForEach([Lang.tr, Lang.en], id: \ .self) { lang in
+                let active = langRaw == lang.rawValue
+                Text(lang.rawValue.uppercased())
+                    .font(.system(size: 10, weight: .bold)).tracking(1)
+                    .foregroundStyle(active ? Theme.onBright : Theme.textLo)
+                    .padding(.horizontal, 8).padding(.vertical, 4)
+                    .background(active ? Theme.active : Color.clear, in: Capsule())
+                    .contentShape(Capsule())
+                    .onTapGesture { langRaw = lang.rawValue }
+            }
+        }
+        .padding(2)
+        .background(Theme.card, in: Capsule())
+        .overlay(Capsule().stroke(Theme.stroke, lineWidth: 1))
     }
 
     // Sol koyu kimlik rayı — uygulamanın kalbi: durum.
     private var identityRail: some View {
         VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text("ZAPRET")
-                    .font(.system(size: 19, weight: .heavy)).tracking(4)
-                    .foregroundStyle(Theme.textHi)
-                Text("MANAGER · v0.2")
-                    .font(.system(size: 10, weight: .semibold)).tracking(3)
-                    .foregroundStyle(Theme.textLo)
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("ZAPRET")
+                        .font(.system(size: 19, weight: .heavy)).tracking(4)
+                        .foregroundStyle(Theme.textHi)
+                    Text("MANAGER · v0.2")
+                        .font(.system(size: 10, weight: .semibold)).tracking(3)
+                        .foregroundStyle(Theme.textLo)
+                }
+                Spacer()
+                languageToggle
             }
 
             Spacer()
@@ -907,7 +963,9 @@ private struct ContentView: View {
                 HStack(spacing: 8) {
                     Image(systemName: manager.isAutoStartEnabled ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
                         .foregroundStyle(manager.isAutoStartEnabled ? Theme.active : Theme.amber)
-                    Text(manager.isAutoStartEnabled ? "Açılışta otomatik başlar" : "Otomatik başlatma kapalı")
+                    Text(manager.isAutoStartEnabled
+                         ? L("Açılışta otomatik başlar", "Starts automatically at login")
+                         : L("Otomatik başlatma kapalı", "Auto-start is off"))
                         .font(.system(size: 11))
                         .foregroundStyle(Theme.textLo)
                     Spacer()
@@ -915,7 +973,7 @@ private struct ContentView: View {
                 .padding(.bottom, 10)
 
                 Button { confirmUninstall = true } label: {
-                    Label("Zapret’i Kaldır", systemImage: "trash")
+                    Label(L("Zapret’i Kaldır", "Uninstall Zapret"), systemImage: "trash")
                         .font(.system(size: 11, weight: .medium))
                 }
                 .buttonStyle(.plain)
@@ -945,25 +1003,25 @@ private struct ContentView: View {
     @ViewBuilder private var controlCluster: some View {
         if state == .notInstalled {
             Button(action: manager.installZapret) {
-                Label("Zapret’i Kur", systemImage: "arrow.down.circle.fill")
+                Label(L("Zapret’i Kur", "Install Zapret"), systemImage: "arrow.down.circle.fill")
             }
             .buttonStyle(PrimaryButtonStyle(tint: Theme.accent, fg: .white))
         } else {
             VStack(spacing: 10) {
                 if manager.isRunning {
                     Button(action: manager.stop) {
-                        Label("Korumayı Durdur", systemImage: "stop.fill")
+                        Label(L("Korumayı Durdur", "Stop Protection"), systemImage: "stop.fill")
                     }
                     .buttonStyle(PrimaryButtonStyle(tint: Theme.warn))
                 } else {
                     Button(action: manager.start) {
-                        Label("Korumayı Başlat", systemImage: "play.fill")
+                        Label(L("Korumayı Başlat", "Start Protection"), systemImage: "play.fill")
                     }
                     .buttonStyle(PrimaryButtonStyle(tint: Theme.active))
                 }
                 HStack(spacing: 8) {
-                    ChipButton(title: "Yeniden Başlat", systemImage: "arrow.clockwise", action: manager.restart)
-                    ChipButton(title: "Yenile", systemImage: "arrow.triangle.2.circlepath", action: manager.refresh)
+                    ChipButton(title: L("Yeniden Başlat", "Restart"), systemImage: "arrow.clockwise", action: manager.restart)
+                    ChipButton(title: L("Yenile", "Refresh"), systemImage: "arrow.triangle.2.circlepath", action: manager.refresh)
                 }
             }
         }
@@ -983,8 +1041,9 @@ private struct ContentView: View {
     }
 
     private var domainsCard: some View {
-        Card(title: "Hedef alan adları", systemImage: "globe") {
-            Text("Her satıra bir kök alan adı yazın. Alt alan adları otomatik kapsanır.")
+        Card(title: L("Hedef alan adları", "Target domains"), systemImage: "globe") {
+            Text(L("Her satıra bir kök alan adı yazın. Alt alan adları otomatik kapsanır.",
+                   "One root domain per line. Subdomains are covered automatically."))
                 .font(.system(size: 12))
                 .foregroundStyle(Theme.textLo)
 
@@ -998,10 +1057,10 @@ private struct ContentView: View {
                 .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Theme.stroke, lineWidth: 1))
 
             HStack {
-                ChipButton(title: "Discord profili", systemImage: "bolt.fill", action: manager.addDiscordPreset)
+                ChipButton(title: L("Discord profili", "Discord profile"), systemImage: "bolt.fill", action: manager.addDiscordPreset)
                 Spacer()
                 Button(action: manager.saveDomains) {
-                    Text("Kaydet ve Uygula")
+                    Text(L("Kaydet ve Uygula", "Save & Apply"))
                 }
                 .buttonStyle(PrimaryButtonStyle(tint: Theme.accent, fg: .white, fullWidth: false))
             }
@@ -1011,9 +1070,10 @@ private struct ContentView: View {
     }
 
     private var diagnosticsCard: some View {
-        Card(title: "Bağlantı testi", systemImage: "dot.radiowaves.left.and.right") {
+        Card(title: L("Bağlantı testi", "Connection test"), systemImage: "dot.radiowaves.left.and.right") {
             if manager.checks.isEmpty {
-                Text("Discord, OpenAI, Anthropic ve GitHub erişimini kontrol et.")
+                Text(L("Discord, OpenAI, Anthropic ve GitHub erişimini kontrol et.",
+                       "Check access to Discord, OpenAI, Anthropic, and GitHub."))
                     .font(.system(size: 12))
                     .foregroundStyle(Theme.textLo)
             } else {
@@ -1038,7 +1098,7 @@ private struct ContentView: View {
                 }
             }
 
-            ChipButton(title: "Bağlantıları Test Et", systemImage: "play.circle", action: manager.runDiagnostics)
+            ChipButton(title: L("Bağlantıları Test Et", "Run Connection Test"), systemImage: "play.circle", action: manager.runDiagnostics)
                 .disabled(!manager.isInstalled || manager.isBusy)
                 .opacity(manager.isInstalled ? 1 : 0.5)
         }

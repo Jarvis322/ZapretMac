@@ -12,6 +12,7 @@ A native macOS app for installing and managing [Zapret](https://github.com/bol-v
 - **Domain list editor.** Edit the list of domains to route through Zapret. Every save is backed up with a timestamp, and there is a built-in Discord profile to get started quickly.
 - **Connection tests.** Check reachability of Discord, OpenAI, Anthropic, and GitHub from inside the app.
 - **Clean uninstall.** Removes everything it installed, restoring your system to its original state.
+- **Bilingual.** English and Turkish, auto-selected from your system language with a one-tap switch in the app.
 
 ## Installation
 
@@ -57,4 +58,4 @@ Requires the Swift toolchain (Xcode or Xcode Command Line Tools).
 
 ## Project status
 
-Version 0.2.1 supports clean install, uninstall, persistent auto-start, password-free control, and automatic recovery. For broad public distribution, an in-app updater plus a Developer ID signature and notarization would remove the first-launch security prompt — these are not yet included.
+Version 0.2.2 supports clean install, uninstall, persistent auto-start, password-free control, automatic recovery, and a bilingual (English/Turkish) interface. For broad public distribution, an in-app updater plus a Developer ID signature and notarization would remove the first-launch security prompt — these are not yet included.
