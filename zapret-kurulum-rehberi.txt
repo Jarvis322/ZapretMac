@@ -1,0 +1,109 @@
+====================================================
+  ZAPRET KURULUM REHBERİ (Turksat - Discord / HTTPS)
+====================================================
+ISP: Turksat (AS47524)
+Çalışan strateji: --tlsrec=midsld --disorder
+Tarih: Haziran 2026
+
+----------------------------------------------------
+1. ADIM — Xcode Command Line Tools (gerekli)
+----------------------------------------------------
+xcode-select --install
+
+
+----------------------------------------------------
+2. ADIM — Zapret'i indir ve kur
+----------------------------------------------------
+cd ~
+git clone https://github.com/bol-van/zapret.git
+cd zapret
+sudo bash install_easy.sh
+
+  Kurulum soruları:
+    - Firewall type: ipfw / pf  → pf seç
+    - Enable tpws: yes
+    - Enable nfqws: no (macOS'ta çalışmaz)
+    - Mode filter: hostlist
+
+
+----------------------------------------------------
+3. ADIM — Config dosyasını düzenle
+----------------------------------------------------
+sudo nano /opt/zapret/config
+
+  Şu satırları bul ve değiştir (2 yerde var: TPWS_OPT ve TPWS_SOCKS_OPT):
+
+  ESKİ:
+    --filter-tcp=443 --split-pos=1,midsld --disorder <HOSTLIST>
+
+  YENİ:
+    --filter-tcp=443 --tlsrec=midsld --disorder <HOSTLIST>
+
+  Filtre modunu yalnız gerekli sitelere uygulanacak şekilde ayarla:
+    MODE_FILTER=hostlist
+
+  IFACE_LAN=en0 satırını aktif bırak. macOS PF yönlendirmesi için gereklidir.
+
+  Ardından hedef alan adlarını oluştur:
+    sudo nano /opt/zapret/ipset/zapret-hosts-user.txt
+
+  Dosya içeriği:
+    discord.com
+    discord.gg
+    discordapp.com
+    discordapp.net
+    discord.media
+    discordcdn.com
+
+  Codex, OpenAI, Claude, Apple ve diğer normal servisleri bu listeye ekleme.
+  Böylece Zapret yalnız Discord trafiğini işler; diğer HTTPS bağlantıları doğrudan gider.
+
+  Kaydet: Ctrl+O → Enter → Ctrl+X
+
+
+----------------------------------------------------
+4. ADIM — Zapret'i başlat
+----------------------------------------------------
+sudo /opt/zapret/init.d/macos/zapret start
+
+
+----------------------------------------------------
+5. ADIM — pf firewall kurallarını uygula
+----------------------------------------------------
+sudo /opt/zapret/init.d/macos/zapret start-fw
+
+
+----------------------------------------------------
+6. ADIM — Test et
+----------------------------------------------------
+curl -s -o /dev/null -w "%{http_code}\n" https://discord.com
+  → 200 görürsen çalışıyor
+
+
+----------------------------------------------------
+7. ADIM — Otomatik başlatma (Mac açılışında)
+----------------------------------------------------
+sudo cp /opt/zapret/init.d/macos/zapret.plist /Library/LaunchDaemons/
+sudo launchctl load /Library/LaunchDaemons/zapret.plist
+
+
+----------------------------------------------------
+SORUN ÇIKARSA: Doğru stratejiyi bul
+----------------------------------------------------
+sudo /opt/zapret/blockcheck.sh
+  (sorduğunda: discord.com yaz)
+
+  Çıktıdaki "curl_test_https" satırlarından birini al,
+  /opt/zapret/config içindeki TPWS_OPT satırını güncelle,
+  sonra: sudo /opt/zapret/init.d/macos/zapret restart
+
+
+----------------------------------------------------
+YARDIMCI KOMUTLAR
+----------------------------------------------------
+Durum:    sudo /opt/zapret/init.d/macos/zapret status
+Yeniden:  sudo /opt/zapret/init.d/macos/zapret restart
+Durdur:   sudo /opt/zapret/init.d/macos/zapret stop
+pf kural: sudo pfctl -a zapret/zapret-v4 -s nat
+
+====================================================
