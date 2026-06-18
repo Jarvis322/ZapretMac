@@ -7,6 +7,7 @@ A native macOS app for installing and managing [Zapret](https://github.com/bol-v
 ## Features
 
 - **One-click install.** Downloads the official Zapret release from GitHub, verifies every file against its `sha256sum.txt` checksum, and installs it to `/opt/zapret`.
+- **Auto-tuned to your connection.** Before installing, it probes your network and picks a DPI-bypass strategy that actually works on your ISP, instead of guessing — no terminal, no trial and error.
 - **Password-free control.** After a single administrator approval at install time, starting, stopping, and saving no longer prompt for your password (see [How privileges work](#how-privileges-work)).
 - **Self-healing.** A lightweight watchdog restarts `tpws` automatically if it ever crashes, so your connection is never left half-broken (see [Resilience](#resilience)).
 - **Domain list editor.** Edit the list of domains to route through Zapret. Every save is backed up with a timestamp, and there is a built-in Discord profile to get started quickly.
@@ -30,6 +31,10 @@ The app is not signed with an Apple Developer ID, so macOS blocks it the first t
 ## How it works
 
 Zapret runs `tpws`, a transparent proxy, and uses the macOS packet filter (PF) to route selected traffic through it. Zapret Manager handles the moving parts around that:
+
+### Auto-tuning
+
+DPI-based censorship varies by ISP, so a single fixed bypass strategy won't work for everyone. Before installing, Zapret Manager runs `tpws` as a local SOCKS proxy (no root, no system changes) and tests a series of bypass strategies against a known-blocked domain, keeping the first one that actually succeeds on your connection. That strategy is written into the install configuration. If none succeed, it falls back to a sensible default and tells you.
 
 ### How privileges work
 
@@ -58,4 +63,4 @@ Requires the Swift toolchain (Xcode or Xcode Command Line Tools).
 
 ## Project status
 
-Version 0.2.2 supports clean install, uninstall, persistent auto-start, password-free control, automatic recovery, and a bilingual (English/Turkish) interface. For broad public distribution, an in-app updater plus a Developer ID signature and notarization would remove the first-launch security prompt — these are not yet included.
+Version 0.3.0 supports auto-tuned install, uninstall, persistent auto-start, password-free control, automatic recovery, and a bilingual (English/Turkish) interface. For broad public distribution, an in-app updater plus a Developer ID signature and notarization would remove the first-launch security prompt — these are not yet included.

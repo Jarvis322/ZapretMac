@@ -108,6 +108,14 @@ private final class ZapretManager: ObservableObject {
             do {
                 let prepared = try await Self.prepareInstallerPayload()
                 temporaryDirectory = prepared.temporaryDirectory
+
+                // Kurulumdan önce bağlantıyı tara: gerçekten çalışan DPI-aşma stratejisini bul.
+                message = L("Bağlantın taranıyor; en uygun ayar bulunuyor...",
+                            "Scanning your connection for the best setting…")
+                let binaryURL = prepared.sourceDirectory.appendingPathComponent("binaries/mac64/tpws")
+                let detection = await Self.detectStrategy(tpwsBinary: binaryURL)
+                try Self.configureFreshInstall(at: prepared.sourceDirectory, strategy: detection.opt)
+
                 message = L("Zapret kuruluyor; yönetici onayı gerekiyor...",
                             "Installing Zapret; administrator approval required…")
                 let source = Self.shellQuote(prepared.sourceDirectory.path)
@@ -128,8 +136,11 @@ private final class ZapretManager: ObservableObject {
                     + ": > \(ZapretPaths.protectFlag); "   // koruma açık: watchdog tpws'i diri tutsun
                     + Self.helperInstallSnippet(staged: staged)
                 _ = try await Task.detached { try Self.runAdministratorCommandInline(command) }.value
-                message = L("Zapret \(prepared.version) kuruldu ve otomatik başlatma etkinleştirildi",
-                            "Zapret \(prepared.version) installed and auto-start enabled")
+                let tuned = detection.autodetected
+                    ? L("bağlantına göre ayarlandı", "tuned to your connection")
+                    : L("varsayılan ayar", "default setting")
+                message = L("Zapret \(prepared.version) kuruldu · \(tuned)",
+                            "Zapret \(prepared.version) installed · \(tuned)")
             } catch {
                 message = L("Kurulum başarısız: \(error.localizedDescription)",
                             "Installation failed: \(error.localizedDescription)")
@@ -174,7 +185,10 @@ private final class ZapretManager: ObservableObject {
                     "pfctl -f /etc/pf.conf 2>/dev/null || true",
                     "rm -f /Library/LaunchDaemons/zapret.plist",
                     "rm -rf /opt/zapret",
-                    "rm -f \(ZapretPaths.sudoers)"
+                    "rm -f \(ZapretPaths.sudoers)",
+                    // Tüm adımlar best-effort (|| true). Zincirin 0 dönmesini garantile ki
+                    // osascript son komutun çıkış kodunu hata sanmasın.
+                    "true"
                 ].joined(separator: "; ")
                 _ = try await Task.detached { try Self.runAdministratorCommandInline(command) }.value
                 domains = ""
@@ -363,8 +377,66 @@ private final class ZapretManager: ObservableObject {
         let relativeBinary = "\(source.lastPathComponent)/binaries/mac64/tpws"
         try verifyChecksums(checksumText, baseDirectory: directory, requiredPath: relativeBinary)
 
-        try configureFreshInstall(at: source)
+        // Yapılandırma (configureFreshInstall) artık çağıran tarafta, strateji taraması sonrası yapılır.
         return (directory, source, release.tagName)
+    }
+
+    // MARK: - Strateji tarama (auto-tune)
+
+    /// Aday tpws desync stratejileri (etkililik sırasına göre). İlk tutan kazanır.
+    nonisolated static let strategyCandidates: [(label: String, opt: String)] = [
+        ("TLS-record split (midsld)", "--tlsrec=midsld --disorder"),
+        ("TLS-record split (sni)",    "--tlsrec=sni"),
+        ("Split at SNI + disorder",   "--split-pos=1,midsld --disorder"),
+        ("Split + disorder",          "--split-pos=1 --disorder"),
+        ("TLS split at SNI + disorder", "--split-tls=sni --disorder"),
+        ("Disorder",                  "--disorder"),
+    ]
+
+    /// Kullanıcının bağlantısında gerçekten çalışan tpws stratejisini bulur. Root GEREKMEZ:
+    /// tpws'i yerel SOCKS proxy olarak çalıştırıp engelli bir test alanına erişimi dener.
+    /// Test alanı zaten erişilebilirse ya da hiçbir aday tutmazsa, varsayılana (`autodetected:false`) düşer.
+    nonisolated static func detectStrategy(tpwsBinary: URL) async -> (opt: String, autodetected: Bool) {
+        let testURL = "https://discord.com/api/v10/gateway"
+        let fallback = strategyCandidates[0].opt
+
+        // tpws'i çalıştırılabilir yap + indirilen dosyadaki olası karantinayı temizle.
+        try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tpwsBinary.path)
+        _ = try? runProcess("/usr/bin/xattr", arguments: ["-d", "com.apple.quarantine", tpwsBinary.path])
+
+        // Test alanı zaten erişiliyorsa (engellenmemiş) ayırt edemeyiz → varsayılan.
+        if curlCode(testURL, socksPort: nil) == "200" { return (fallback, false) }
+
+        for (index, candidate) in strategyCandidates.enumerated() {
+            if await probeStrategy(tpwsBinary: tpwsBinary, port: 17900 + index, opt: candidate.opt, testURL: testURL) {
+                return (candidate.opt, true)
+            }
+        }
+        return (fallback, false)
+    }
+
+    /// Tek bir stratejiyi SOCKS proxy üzerinden dener. Test alanı 200 dönerse strateji çalışıyor demektir.
+    nonisolated private static func probeStrategy(tpwsBinary: URL, port: Int, opt: String, testURL: String) async -> Bool {
+        let proc = Process()
+        proc.executableURL = tpwsBinary
+        proc.arguments = ["--socks", "--port=\(port)"] + opt.split(separator: " ").map(String.init)
+        proc.standardOutput = Pipe()
+        proc.standardError = Pipe()
+        guard (try? proc.run()) != nil else { return false }
+        // tpws SIGTERM'i yok sayar → temizlikte mutlaka SIGKILL.
+        defer { kill(proc.processIdentifier, SIGKILL) }
+
+        try? await Task.sleep(nanoseconds: 800_000_000)
+        guard proc.isRunning else { return false }
+        return curlCode(testURL, socksPort: port) == "200"
+    }
+
+    /// curl ile HTTP durum kodunu döndürür (doğrudan ya da yerel SOCKS proxy üzerinden). Hata → "000".
+    nonisolated private static func curlCode(_ url: String, socksPort: Int?) -> String {
+        var args = ["-4", "--max-time", "8", "-sS", "-o", "/dev/null", "-w", "%{http_code}"]
+        if let socksPort { args = ["--socks5", "127.0.0.1:\(socksPort)"] + args }
+        let out = try? runProcess("/usr/bin/curl", arguments: args + [url])
+        return (out?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 } ?? "000"
     }
 
     /// `sha256sum.txt` içindeki her kayıt için ilgili dosyanın hash'ini doğrular.
@@ -428,7 +500,7 @@ private final class ZapretManager: ObservableObject {
         try FileManager.default.moveItem(at: temporaryURL, to: localURL)
     }
 
-    nonisolated private static func configureFreshInstall(at source: URL) throws {
+    nonisolated private static func configureFreshInstall(at source: URL, strategy: String) throws {
         let defaultConfigURL = source.appendingPathComponent("config.default")
         let configURL = source.appendingPathComponent("config")
         var config = try String(contentsOf: defaultConfigURL, encoding: .utf8)
@@ -442,7 +514,7 @@ private final class ZapretManager: ObservableObject {
         let replacements = [
             "GZIP_LISTS=1": "GZIP_LISTS=0",
             "#LISTS_RELOAD=\"pfctl -f /etc/pf.conf\"": "LISTS_RELOAD=\"/opt/zapret/init.d/macos/zapret reload-fw-tables\"",
-            "--filter-tcp=443 --split-pos=1,midsld --disorder <HOSTLIST>": "--filter-tcp=443 --tlsrec=midsld --disorder <HOSTLIST>",
+            "--filter-tcp=443 --split-pos=1,midsld --disorder <HOSTLIST>": "--filter-tcp=443 \(strategy) <HOSTLIST>",
             "TPWS_ENABLE=0": "TPWS_ENABLE=1",
             "MODE_FILTER=none": "MODE_FILTER=hostlist",
             "#IFACE_LAN=eth0": "IFACE_LAN=\(interface)"
