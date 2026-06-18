@@ -9,6 +9,12 @@ private enum ZapretPaths {
     /// Root sahipli, sudoers ile şifresiz çağrılabilen ayrıcalıklı yardımcı.
     static let helper = "/opt/zapret/zapret-mgr-helper.sh"
     static let sudoers = "/etc/sudoers.d/zapret-manager"
+    /// tpws'i izleyip ölürse yeniden başlatan watchdog.
+    static let watchdog = "/opt/zapret/zapret-watchdog.sh"
+    static let watchdogPlist = "/Library/LaunchDaemons/zapret-watchdog.plist"
+    /// İstenen-durum bayrağı: varsa koruma açık olmalı (watchdog tpws'i diri tutar);
+    /// yoksa kullanıcı bilerek durdurmuş demektir (watchdog dokunmaz).
+    static let protectFlag = "/opt/zapret/.mgr-protect-enabled"
 }
 
 private struct EndpointCheck: Identifiable {
@@ -101,6 +107,7 @@ private final class ZapretManager: ObservableObject {
                     + "launchctl enable system/zapret >/dev/null 2>&1 || true; "
                     + "launchctl bootstrap system /Library/LaunchDaemons/zapret.plist >/dev/null 2>&1 || true; "
                     + "launchctl kickstart -k system/zapret >/dev/null 2>&1 || true; "
+                    + ": > \(ZapretPaths.protectFlag); "   // koruma açık: watchdog tpws'i diri tutsun
                     + Self.helperInstallSnippet(staged: staged)
                 _ = try await Task.detached { try Self.runAdministratorCommandInline(command) }.value
                 message = "Zapret \(prepared.version) kuruldu ve otomatik başlatma etkinleştirildi"
@@ -129,6 +136,12 @@ private final class ZapretManager: ObservableObject {
                 // yönlendirme kalır ve TÜM HTTPS trafiği reddedilir (internet kopar).
                 // Ardından garanti olarak zapret PF anchor'ını ve pf.conf satırlarını da temizleriz.
                 let command = [
+                    // ÖNCE watchdog'u sustur: bayrağı kaldır + watchdog'u boot-out et, yoksa tpws'i
+                    // öldürdüğümüzde watchdog onu yeniden başlatabilir (yarış).
+                    "rm -f \(ZapretPaths.protectFlag)",
+                    "launchctl bootout system/zapret-watchdog 2>/dev/null || true",
+                    "rm -f \(ZapretPaths.watchdogPlist)",
+                    // Firewall'ı geri al (PF rdr kalırsa internet kopar), sonra daemon'u durdur.
                     "[ -x \(ZapretPaths.executable) ] && \(ZapretPaths.executable) stop 2>/dev/null || true",
                     "launchctl bootout system/zapret 2>/dev/null || true",
                     "launchctl disable system/zapret 2>/dev/null || true",
@@ -485,27 +498,42 @@ private final class ZapretManager: ObservableObject {
         return try runProcess("/usr/bin/osascript", arguments: ["-e", script])
     }
 
-    /// Yardımcı script ve sudoers kuralını, sahibine özel (0700) geçici dizine yazar.
-    nonisolated private static func stageHelperPayload(in directory: URL) throws -> (helper: URL, sudoers: URL) {
+    /// Yardımcı, sudoers, watchdog script ve watchdog plist'ini sahibine özel (0700) geçici dizine yazar.
+    nonisolated private static func stageHelperPayload(in directory: URL)
+        throws -> (helper: URL, sudoers: URL, watchdog: URL, watchdogPlist: URL) {
         let helperURL = directory.appendingPathComponent("zapret-mgr-helper.sh")
         let sudoersURL = directory.appendingPathComponent("zapret-manager.sudoers")
+        let watchdogURL = directory.appendingPathComponent("zapret-watchdog.sh")
+        let watchdogPlistURL = directory.appendingPathComponent("zapret-watchdog.plist")
         try helperScript.write(to: helperURL, atomically: true, encoding: .utf8)
         try sudoersRule().write(to: sudoersURL, atomically: true, encoding: .utf8)
-        return (helperURL, sudoersURL)
+        try watchdogScript.write(to: watchdogURL, atomically: true, encoding: .utf8)
+        try watchdogPlistContent.write(to: watchdogPlistURL, atomically: true, encoding: .utf8)
+        return (helperURL, sudoersURL, watchdogURL, watchdogPlistURL)
     }
 
-    /// Geçici dosyalardan yardımcıyı ve sudoers kuralını yerine kuran kabuk parçası.
+    /// Geçici dosyalardan yardımcıyı, sudoers kuralını ve watchdog'u yerine kuran kabuk parçası.
     /// Idempotent: her ayrıcalıklı işlemde güvenle yeniden çalıştırılabilir. Geçersiz sudoers
     /// dosyası `visudo -c` ile reddedilir ve silinir, böylece sudo bozulmaz.
-    nonisolated private static func helperInstallSnippet(staged: (helper: URL, sudoers: URL)) -> String {
-        "install -o root -g wheel -m 755 \(shellQuote(staged.helper.path)) \(ZapretPaths.helper); "
-            + "install -o root -g wheel -m 440 \(shellQuote(staged.sudoers.path)) \(ZapretPaths.sudoers); "
-            + "visudo -cf \(ZapretPaths.sudoers) >/dev/null 2>&1 || rm -f \(ZapretPaths.sudoers)"
+    nonisolated private static func helperInstallSnippet(
+        staged: (helper: URL, sudoers: URL, watchdog: URL, watchdogPlist: URL)
+    ) -> String {
+        [
+            "install -o root -g wheel -m 755 \(shellQuote(staged.helper.path)) \(ZapretPaths.helper)",
+            "install -o root -g wheel -m 440 \(shellQuote(staged.sudoers.path)) \(ZapretPaths.sudoers)",
+            "visudo -cf \(ZapretPaths.sudoers) >/dev/null 2>&1 || rm -f \(ZapretPaths.sudoers)",
+            // watchdog kur + launchd'e yükle (idempotent)
+            "install -o root -g wheel -m 755 \(shellQuote(staged.watchdog.path)) \(ZapretPaths.watchdog)",
+            "install -o root -g wheel -m 644 \(shellQuote(staged.watchdogPlist.path)) \(ZapretPaths.watchdogPlist)",
+            "launchctl bootout system/zapret-watchdog >/dev/null 2>&1 || true",
+            "launchctl enable system/zapret-watchdog >/dev/null 2>&1 || true",
+            "launchctl bootstrap system \(ZapretPaths.watchdogPlist) >/dev/null 2>&1 || true"
+        ].joined(separator: "; ")
     }
 
     /// Kurulu yardımcının sürümünü işaretler. Script mantığı değişince artırılır; `canUseHelper`
     /// bu damgayı arar ve eşleşmezse eski yardımcıyı tek seferlik istemle günceller.
-    nonisolated private static let helperVersionToken = "zapret-mgr-helper v3"
+    nonisolated private static let helperVersionToken = "zapret-mgr-helper v4"
 
     /// Root olarak (sudo ile) çalışan yardımcı. Yalnızca beyaz listedeki alt komutları kabul eder;
     /// tüm argümanlar tırnaklanır, `eval` yoktur. Root sahipli ve 0755 olduğundan yalnızca root
@@ -517,11 +545,12 @@ private final class ZapretManager: ObservableObject {
     /// kesin sonlandırırız.
     nonisolated private static let helperScript = """
     #!/bin/sh
-    # zapret-mgr-helper v3
+    # zapret-mgr-helper v4
     set -e
     ZAPRET="/opt/zapret/init.d/macos/zapret"
     TPWS="/opt/zapret/tpws/tpws"
     HOSTLIST="/opt/zapret/ipset/zapret-hosts-user.txt"
+    FLAG="/opt/zapret/.mgr-protect-enabled"
 
     hard_stop() {
         "$ZAPRET" stop 2>/dev/null || true
@@ -536,12 +565,17 @@ private final class ZapretManager: ObservableObject {
 
     case "$1" in
         start)
+            # İstenen durum: açık. Watchdog tpws ölürse yeniden başlatır.
+            : > "$FLAG"
             exec "$ZAPRET" start
             ;;
         stop)
+            # İstenen durum: kapalı. Bayrağı ÖNCE kaldır ki watchdog diriltmesin.
+            rm -f "$FLAG"
             hard_stop
             ;;
         restart)
+            : > "$FLAG"
             hard_stop
             exec "$ZAPRET" start
             ;;
@@ -550,6 +584,7 @@ private final class ZapretManager: ObservableObject {
             ts="$(date +%Y%m%d-%H%M%S)"
             [ -f "$HOSTLIST" ] && cp "$HOSTLIST" "$HOSTLIST.backup-$ts"
             install -o root -g wheel -m 644 "$2" "$HOSTLIST"
+            : > "$FLAG"
             hard_stop
             exec "$ZAPRET" start
             ;;
@@ -561,6 +596,43 @@ private final class ZapretManager: ObservableObject {
             exit 2
             ;;
     esac
+
+    """
+
+    /// tpws watchdog'u: koruma açık olması gerekirken (bayrak var) tpws ölmüşse yeniden başlatır.
+    /// launchd tarafından düzenli aralıkla çalıştırılır. PF yönlendirmesi aktifken tpws ölürse
+    /// tüm HTTPS kopar; bu watchdog onu ~aralık kadar sürede geri getirir.
+    nonisolated private static let watchdogScript = """
+    #!/bin/sh
+    # zapret-watchdog v1
+    FLAG="/opt/zapret/.mgr-protect-enabled"
+    TPWS="/opt/zapret/tpws/tpws"
+    ZAPRET="/opt/zapret/init.d/macos/zapret"
+    [ -f "$FLAG" ] || exit 0
+    pgrep -f "$TPWS" >/dev/null 2>&1 && exit 0
+    "$ZAPRET" start >/dev/null 2>&1
+    exit 0
+
+    """
+
+    nonisolated private static let watchdogPlistContent = """
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+    <plist version="1.0">
+    <dict>
+        <key>Label</key>
+        <string>zapret-watchdog</string>
+        <key>ProgramArguments</key>
+        <array>
+            <string>/bin/sh</string>
+            <string>/opt/zapret/zapret-watchdog.sh</string>
+        </array>
+        <key>RunAtLoad</key>
+        <true/>
+        <key>StartInterval</key>
+        <integer>10</integer>
+    </dict>
+    </plist>
 
     """
 

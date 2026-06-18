@@ -39,9 +39,13 @@ Uygulama Developer ID ile imzalanıp notarize edilmediği için, indirildikten s
 
 Bu yalnızca ilk açılışta gereklidir.
 
+## Dayanıklılık (watchdog)
+
+tpws beklenmedik şekilde sonlanırsa (çökme, uyku/uyanma) PF yönlendirmesi nedeniyle tüm HTTPS kopabilir. Bunu önlemek için bir watchdog LaunchDaemon (`zapret-watchdog`) tpws'i ~10 saniyede bir izler ve koruma açık olması gerekirken (istenen-durum bayrağı) tpws ölmüşse otomatik yeniden başlatır. Kullanıcı korumayı bilerek durdurduysa watchdog dokunmaz.
+
 ## Kaldırma
 
-Uygulamadaki sol paneldeki **Zapret’i Kaldır** düğmesi; `/opt/zapret`, LaunchDaemon (otomatik başlatma) ve sudoers (şifresiz erişim) kuralını tamamen siler.
+Uygulamadaki sol paneldeki **Zapret’i Kaldır** düğmesi; `/opt/zapret`, LaunchDaemon (otomatik başlatma), watchdog ve sudoers (şifresiz erişim) kuralını tamamen siler.
 
 ## Mevcut sınır
 
