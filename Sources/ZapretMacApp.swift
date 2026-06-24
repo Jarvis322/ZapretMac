@@ -35,7 +35,7 @@ private enum ZapretPaths {
 
 private enum AppInfo {
     /// Tek kaynak: arayüz etiketi, User-Agent ve paket sürümü buradan beslenir.
-    static let version = "0.4.0"
+    static let version = "0.5.0"
 }
 
 /// Sistemin gerçekten geçtiği temiz DoH çözücüleri ve durum işaretçisi.
@@ -88,6 +88,10 @@ private final class ZapretManager: ObservableObject {
     @Published var dnsPoisoned: Bool? = nil
     /// Uygulamanın temiz DNS'i (DoH çözücüleri) sistemde aktif edip etmediği.
     @Published var dnsManaged = false
+    /// GitHub'da daha yeni bir sürüm varsa onun numarası (ör. "0.5.0"); yoksa nil.
+    @Published var updateAvailable: String? = nil
+    /// Yeni sürümün DMG indirme adresi (güncelleme bulunduğunda dolar).
+    private var latestDmgURL: String?
 
     private var discordPreset: [String] { Self.discordPresetStatic }
 
@@ -354,6 +358,36 @@ private final class ZapretManager: ObservableObject {
     func refreshDnsState() async {
         dnsManaged = Self.cleanDnsActive()
         dnsPoisoned = await Self.detectDnsPoisoning()
+    }
+
+    /// GitHub'daki en son yayını sorgular; mevcut sürümden yeniyse `updateAvailable`'ı doldurur.
+    /// Sessiz çalışır: ağ/hata durumunda hiçbir şey göstermez.
+    func checkForUpdate() async {
+        guard let release = try? await Self.fetchAppRelease(),
+              Self.versionIsNewer(release.version, than: AppInfo.version) else { return }
+        updateAvailable = release.version
+        latestDmgURL = release.dmgURL
+    }
+
+    /// Yeni sürümün DMG'sini indirip açar (DMG bağlanır, kullanıcı Applications'a sürükler).
+    /// İndirme başarısızsa sürüm sayfasını tarayıcıda açar.
+    func downloadUpdate() {
+        isBusy = true
+        message = L("Güncelleme indiriliyor...", "Downloading update…")
+        Task {
+            defer { isBusy = false }
+            if let urlString = latestDmgURL, let url = URL(string: urlString),
+               let dmg = try? await Self.downloadToDownloads(url) {
+                message = L("Güncelleme indirildi; kurulum penceresi açılıyor",
+                            "Update downloaded; opening installer")
+                NSWorkspace.shared.open(dmg)
+                return
+            }
+            // Yedek: sürüm sayfasını aç.
+            if let page = URL(string: Self.repoReleasesPage) { NSWorkspace.shared.open(page) }
+            message = L("İndirme başarısız; sürüm sayfası açıldı",
+                        "Download failed; opened the releases page")
+        }
     }
 
     func useCleanDNS() {
@@ -942,6 +976,56 @@ private final class ZapretManager: ObservableObject {
         return nil
     }
 
+    // MARK: - Uygulama güncellemesi (GitHub Releases)
+
+    nonisolated private static let repoLatestAPI =
+        "https://api.github.com/repos/Jarvis322/ZapretMac/releases/latest"
+    nonisolated private static let repoReleasesPage =
+        "https://github.com/Jarvis322/ZapretMac/releases/latest"
+
+    /// GitHub'daki en son yayının sürümünü ve DMG adresini döndürür.
+    nonisolated private static func fetchAppRelease() async throws -> (version: String, dmgURL: String?) {
+        var request = URLRequest(url: URL(string: repoLatestAPI)!)
+        request.setValue("ZapretManager/\(AppInfo.version)", forHTTPHeaderField: "User-Agent")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+            throw NSError(domain: "ZapretMac", code: 30)
+        }
+        let release = try JSONDecoder().decode(GitHubRelease.self, from: data)
+        let version = release.tagName.hasPrefix("v") ? String(release.tagName.dropFirst()) : release.tagName
+        let dmg = release.assets.first { $0.name.lowercased().hasSuffix(".dmg") }?
+            .browserDownloadURL.absoluteString
+        return (version, dmg)
+    }
+
+    /// Noktalı sürümleri sayısal bileşenlerine göre kıyaslar (ör. 0.10.0 > 0.9.0). `a` daha yeniyse true.
+    nonisolated static func versionIsNewer(_ a: String, than b: String) -> Bool {
+        let pa = a.split(separator: ".").map { Int($0) ?? 0 }
+        let pb = b.split(separator: ".").map { Int($0) ?? 0 }
+        for i in 0..<max(pa.count, pb.count) {
+            let x = i < pa.count ? pa[i] : 0
+            let y = i < pb.count ? pb[i] : 0
+            if x != y { return x > y }
+        }
+        return false
+    }
+
+    /// DMG'yi İndirilenler klasörüne indirir (yoksa geçici dizine) ve hedef URL'yi döndürür.
+    nonisolated private static func downloadToDownloads(_ url: URL) async throws -> URL {
+        var request = URLRequest(url: url)
+        request.setValue("ZapretManager/\(AppInfo.version)", forHTTPHeaderField: "User-Agent")
+        let (tmp, response) = try await URLSession.shared.download(for: request)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+            throw NSError(domain: "ZapretMac", code: 31)
+        }
+        let dir = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        let dest = dir.appendingPathComponent(url.lastPathComponent)
+        try? FileManager.default.removeItem(at: dest)
+        try FileManager.default.moveItem(at: tmp, to: dest)
+        return dest
+    }
+
     nonisolated private static func runProcess(_ path: String, arguments: [String]) throws -> String {
         let process = Process()
         let output = Pipe()
@@ -1157,7 +1241,10 @@ private struct ContentView: View {
         }
         .frame(minWidth: 780, minHeight: 600)
         .preferredColorScheme(.dark)
-        .task { await manager.refreshDnsState() }
+        .task {
+            await manager.refreshDnsState()
+            await manager.checkForUpdate()
+        }
         .confirmationDialog(L("Zapret tamamen kaldırılsın mı?", "Remove Zapret completely?"),
                             isPresented: $confirmUninstall, titleVisibility: .visible) {
             Button(L("Kaldır", "Remove"), role: .destructive) { manager.uninstall() }
@@ -1198,6 +1285,21 @@ private struct ContentView: View {
                     Text("MANAGER · v\(AppInfo.version)")
                         .font(.system(size: 10, weight: .semibold)).tracking(3)
                         .foregroundStyle(Theme.textLo)
+                    if let newVersion = manager.updateAvailable {
+                        Button(action: manager.downloadUpdate) {
+                            HStack(spacing: 5) {
+                                Image(systemName: "arrow.down.circle.fill")
+                                Text(L("Güncelle → v\(newVersion)", "Update → v\(newVersion)"))
+                            }
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(Theme.onBright)
+                            .padding(.horizontal, 9).padding(.vertical, 4)
+                            .background(Theme.accent, in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(manager.isBusy)
+                        .padding(.top, 4)
+                    }
                 }
                 Spacer()
                 languageToggle

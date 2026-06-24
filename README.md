@@ -13,6 +13,7 @@ A native macOS app for installing and managing [Zapret](https://github.com/bol-v
 - **Domain list editor.** Edit the list of domains to route through Zapret. Every save is backed up with a timestamp, and there is a built-in Discord profile to get started quickly.
 - **DNS-block bypass.** Some sites (e.g. Discord in Türkiye) are blocked by ISP DNS poisoning, not DPI — a case `tpws` cannot fix. The app detects poisoned DNS and can switch your connection to clean DoH-capable resolvers (1.1.1.1 / 8.8.8.8) in one click, restoring the original setting on revert or uninstall (see [DNS-based blocks](#dns-based-blocks)).
 - **Connection tests.** Check reachability of Discord, OpenAI, Anthropic, and GitHub from inside the app — with a dedicated DNS row that tells you whether a failure is DNS- or DPI-based.
+- **In-app updates.** On launch the app checks GitHub for a newer release; if one exists, an **Update → vX.Y.Z** button appears that downloads the new DMG and opens it for drag-to-install.
 - **Clean uninstall.** Removes everything it installed, restoring your system to its original state.
 - **Bilingual.** English and Turkish, auto-selected from your system language with a one-tap switch in the app.
 
@@ -70,4 +71,4 @@ Requires the Swift toolchain (Xcode or Xcode Command Line Tools).
 
 ## Project status
 
-Version 0.4.0 supports auto-tuned install, uninstall, persistent auto-start, password-free control, automatic recovery, DNS-poisoning detection with one-click clean DNS, and a bilingual (English/Turkish) interface. For broad public distribution, an in-app updater plus a Developer ID signature and notarization would remove the first-launch security prompt — these are not yet included.
+Version 0.5.0 supports auto-tuned install, uninstall, persistent auto-start, password-free control, automatic recovery, DNS-poisoning detection with one-click clean DNS, in-app update checks against GitHub releases, and a bilingual (English/Turkish) interface. For broad public distribution, a Developer ID signature and notarization would remove the first-launch security prompt — this is not yet included.
