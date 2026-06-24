@@ -33,6 +33,21 @@ private enum ZapretPaths {
     static let protectFlag = "/opt/zapret/.mgr-protect-enabled"
 }
 
+private enum AppInfo {
+    /// Tek kaynak: arayüz etiketi, User-Agent ve paket sürümü buradan beslenir.
+    static let version = "0.4.0"
+}
+
+/// Sistemin gerçekten geçtiği temiz DoH çözücüleri ve durum işaretçisi.
+private enum CleanDNS {
+    /// `set-dns` ile uygulanan IPv4 çözücüler. İlk eleman aynı zamanda "yönetiliyor" işareti.
+    static let servers = ["1.1.1.1", "1.0.0.1", "8.8.8.8", "8.8.4.4"]
+    /// DoH üzerinden (DNS bootstrap gerektirmeden) IP-literal sorgu adresi.
+    static let dohQuery = "https://1.1.1.1/dns-query"
+    /// Zehirlenme tespitinde referans alınan, Türkiye'de DNS ile engellenen alan.
+    static let probeHost = "discord.com"
+}
+
 private struct EndpointCheck: Identifiable {
     let id = UUID()
     let name: String
@@ -69,6 +84,10 @@ private final class ZapretManager: ObservableObject {
     @Published var message = L("Hazır", "Ready")
     @Published var isBusy = false
     @Published var checks: [EndpointCheck] = []
+    /// Sistem DNS'i sahte (sinkhole) cevap veriyor mu? nil = henüz test edilmedi.
+    @Published var dnsPoisoned: Bool? = nil
+    /// Uygulamanın temiz DNS'i (DoH çözücüleri) sistemde aktif edip etmediği.
+    @Published var dnsManaged = false
 
     private var discordPreset: [String] { Self.discordPresetStatic }
 
@@ -80,6 +99,7 @@ private final class ZapretManager: ObservableObject {
         isInstalled = FileManager.default.isExecutableFile(atPath: ZapretPaths.executable)
         isRunning = Self.processIsRunning()
         isAutoStartEnabled = FileManager.default.fileExists(atPath: "/Library/LaunchDaemons/zapret.plist")
+        dnsManaged = Self.cleanDnsActive()
         if let contents = try? String(contentsOfFile: ZapretPaths.hostlist, encoding: .utf8) {
             domains = contents
                 .split(whereSeparator: \ .isNewline)
@@ -136,11 +156,21 @@ private final class ZapretManager: ObservableObject {
                     + ": > \(ZapretPaths.protectFlag); "   // koruma açık: watchdog tpws'i diri tutsun
                     + Self.helperInstallSnippet(staged: staged)
                 _ = try await Task.detached { try Self.runAdministratorCommandInline(command) }.value
+
+                // tpws yalnızca DPI/SNI engellerini aşar; Türkiye'de Discord gibi alanlar DNS
+                // zehirlenmesiyle engellidir. Zehirlenme varsa temiz DNS'e geç (yardımcı artık
+                // kurulu olduğundan şifresiz çalışır), aksi halde alanlar tpws'e rağmen açılmaz.
+                let poisoned = await Self.detectDnsPoisoning()
+                if poisoned { _ = try? await Self.runPrivileged(helperArgs: ["set-dns"]) }
+
                 let tuned = detection.autodetected
                     ? L("bağlantına göre ayarlandı", "tuned to your connection")
                     : L("varsayılan ayar", "default setting")
-                message = L("Zapret \(prepared.version) kuruldu · \(tuned)",
-                            "Zapret \(prepared.version) installed · \(tuned)")
+                let dnsNote = poisoned
+                    ? L(" · temiz DNS açıldı", " · clean DNS enabled")
+                    : ""
+                message = L("Zapret \(prepared.version) kuruldu · \(tuned)\(dnsNote)",
+                            "Zapret \(prepared.version) installed · \(tuned)\(dnsNote)")
             } catch {
                 message = L("Kurulum başarısız: \(error.localizedDescription)",
                             "Installation failed: \(error.localizedDescription)")
@@ -175,6 +205,8 @@ private final class ZapretManager: ObservableObject {
                     "rm -f \(ZapretPaths.watchdogPlist)",
                     // Firewall'ı geri al (PF rdr kalırsa internet kopar), sonra daemon'u durdur.
                     "[ -x \(ZapretPaths.executable) ] && \(ZapretPaths.executable) stop 2>/dev/null || true",
+                    // DNS'i yalnızca biz değiştirdiysek (yedek varsa) eski haline döndür; rm'den ÖNCE.
+                    "[ -f /opt/zapret/.dns-backup ] && [ -x \(ZapretPaths.helper) ] && sh \(ZapretPaths.helper) reset-dns 2>/dev/null || true",
                     "launchctl bootout system/zapret 2>/dev/null || true",
                     "launchctl disable system/zapret 2>/dev/null || true",
                     "pkill -f /opt/zapret/tpws/tpws 2>/dev/null || true",
@@ -255,7 +287,20 @@ private final class ZapretManager: ObservableObject {
                 ("Anthropic / Claude", "https://api.anthropic.com", [404]),
                 ("GitHub", "https://github.com", [200])
             ]
-            var output: [EndpointCheck] = []
+            // Önce DNS: zehirlenme DPI'dan bağımsızdır ve tpws ile çözülmez. Ayrı satırla göster ki
+            // kullanıcı "DNS mi DPI mi" olduğunu görsün (ör. Discord = DNS engeli).
+            let poisoned = await Self.detectDnsPoisoning()
+            dnsPoisoned = poisoned
+            dnsManaged = Self.cleanDnsActive()
+            var output: [EndpointCheck] = [
+                EndpointCheck(
+                    name: "DNS",
+                    result: dnsManaged
+                        ? L("temiz (yönetiliyor)", "clean (managed)")
+                        : (poisoned ? L("zehirli", "poisoned") : L("temiz", "clean")),
+                    succeeded: !poisoned || dnsManaged
+                )
+            ]
             for target in targets {
                 let code = await Self.httpStatus(for: target.1)
                 output.append(EndpointCheck(
@@ -302,6 +347,35 @@ private final class ZapretManager: ObservableObject {
         isInstalled = FileManager.default.isExecutableFile(atPath: ZapretPaths.executable)
         isRunning = Self.processIsRunning()
         isAutoStartEnabled = FileManager.default.fileExists(atPath: "/Library/LaunchDaemons/zapret.plist")
+        dnsManaged = Self.cleanDnsActive()
+    }
+
+    /// DNS durumunu (yönetiliyor mu + sistem zehirli mi) tazeler. Açılışta ve DNS işlemlerinden sonra çağrılır.
+    func refreshDnsState() async {
+        dnsManaged = Self.cleanDnsActive()
+        dnsPoisoned = await Self.detectDnsPoisoning()
+    }
+
+    func useCleanDNS() {
+        runDnsAction("set-dns", success: L("Temiz DNS etkinleştirildi", "Clean DNS enabled"))
+    }
+    func restoreSystemDNS() {
+        runDnsAction("reset-dns", success: L("Sistem DNS'ine dönüldü", "Reverted to system DNS"))
+    }
+    private func runDnsAction(_ action: String, success: String) {
+        isBusy = true
+        message = L("DNS ayarlanıyor...", "Updating DNS…")
+        Task {
+            do {
+                _ = try await Self.runPrivileged(helperArgs: [action])
+                message = success
+            } catch {
+                message = L("DNS işlemi başarısız: \(error.localizedDescription)",
+                            "DNS update failed: \(error.localizedDescription)")
+            }
+            await refreshDnsState()
+            isBusy = false
+        }
     }
 
     private static func validatedDomains(from text: String) -> (valid: [String], invalid: [String]) {
@@ -340,7 +414,7 @@ private final class ZapretManager: ObservableObject {
     ) {
         let apiURL = URL(string: "https://api.github.com/repos/bol-van/zapret/releases/latest")!
         var request = URLRequest(url: apiURL)
-        request.setValue("ZapretManager/0.2", forHTTPHeaderField: "User-Agent")
+        request.setValue("ZapretManager/\(AppInfo.version)", forHTTPHeaderField: "User-Agent")
         let (releaseData, response) = try await URLSession.shared.data(for: request)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else {
             throw NSError(domain: "ZapretMac", code: 20, userInfo: [NSLocalizedDescriptionKey: "GitHub sürüm bilgisi alınamadı"])
@@ -432,8 +506,11 @@ private final class ZapretManager: ObservableObject {
     }
 
     /// curl ile HTTP durum kodunu döndürür (doğrudan ya da yerel SOCKS proxy üzerinden). Hata → "000".
+    /// DoH (`--doh-url`) ile çözüm yapar: aksi halde ISP'nin DNS zehirlenmesi strateji taramasını
+    /// sahte IP'ye yönlendirip her stratejiyi başarısız gösterir (DPI'yı değil DNS'i ölçmüş oluruz).
     nonisolated private static func curlCode(_ url: String, socksPort: Int?) -> String {
-        var args = ["-4", "--max-time", "8", "-sS", "-o", "/dev/null", "-w", "%{http_code}"]
+        var args = ["-4", "--doh-url", CleanDNS.dohQuery,
+                    "--max-time", "8", "-sS", "-o", "/dev/null", "-w", "%{http_code}"]
         if let socksPort { args = ["--socks5", "127.0.0.1:\(socksPort)"] + args }
         let out = try? runProcess("/usr/bin/curl", arguments: args + [url])
         return (out?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 } ?? "000"
@@ -492,7 +569,7 @@ private final class ZapretManager: ObservableObject {
 
     nonisolated private static func download(_ remoteURL: URL, to localURL: URL) async throws {
         var request = URLRequest(url: remoteURL)
-        request.setValue("ZapretManager/0.2", forHTTPHeaderField: "User-Agent")
+        request.setValue("ZapretManager/\(AppInfo.version)", forHTTPHeaderField: "User-Agent")
         let (temporaryURL, response) = try await URLSession.shared.download(for: request)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else {
             throw NSError(domain: "ZapretMac", code: 25, userInfo: [NSLocalizedDescriptionKey: "Dosya indirilemedi: \(remoteURL.lastPathComponent)"])
@@ -634,7 +711,7 @@ private final class ZapretManager: ObservableObject {
 
     /// Kurulu yardımcının sürümünü işaretler. Script mantığı değişince artırılır; `canUseHelper`
     /// bu damgayı arar ve eşleşmezse eski yardımcıyı tek seferlik istemle günceller.
-    nonisolated private static let helperVersionToken = "zapret-mgr-helper v4"
+    nonisolated private static let helperVersionToken = "zapret-mgr-helper v5"
 
     /// Root olarak (sudo ile) çalışan yardımcı. Yalnızca beyaz listedeki alt komutları kabul eder;
     /// tüm argümanlar tırnaklanır, `eval` yoktur. Root sahipli ve 0755 olduğundan yalnızca root
@@ -646,12 +723,14 @@ private final class ZapretManager: ObservableObject {
     /// kesin sonlandırırız.
     nonisolated private static let helperScript = """
     #!/bin/sh
-    # zapret-mgr-helper v4
+    # zapret-mgr-helper v5
     set -e
     ZAPRET="/opt/zapret/init.d/macos/zapret"
     TPWS="/opt/zapret/tpws/tpws"
     HOSTLIST="/opt/zapret/ipset/zapret-hosts-user.txt"
     FLAG="/opt/zapret/.mgr-protect-enabled"
+    DNS_BACKUP="/opt/zapret/.dns-backup"
+    CLEAN_DNS="1.1.1.1 1.0.0.1 8.8.8.8 8.8.4.4"
 
     hard_stop() {
         "$ZAPRET" stop 2>/dev/null || true
@@ -662,6 +741,19 @@ private final class ZapretManager: ObservableObject {
             pids=$(pgrep -f "$TPWS" 2>/dev/null || true)
             [ -n "$pids" ] && kill -9 $pids 2>/dev/null || true
         fi
+    }
+
+    # Varsayılan rotanın arayüzünden birincil ağ servisinin adını bulur (ör. "Wi-Fi").
+    primary_service() {
+        dev=$(route -n get default 2>/dev/null | awk '/interface:/{print $2}')
+        [ -n "$dev" ] || return 1
+        networksetup -listnetworkserviceorder 2>/dev/null | awk -v d="$dev" '
+            /^\\([0-9]+\\)/ { name=$0; sub(/^\\([0-9]+\\) /,"",name) }
+            /Device:/ { if (index($0, "Device: " d)) { print name; exit } }'
+    }
+    flush_dns() {
+        dscacheutil -flushcache 2>/dev/null || true
+        killall -HUP mDNSResponder 2>/dev/null || true
     }
 
     case "$1" in
@@ -688,6 +780,36 @@ private final class ZapretManager: ObservableObject {
             : > "$FLAG"
             hard_stop
             exec "$ZAPRET" start
+            ;;
+        set-dns)
+            # Temiz DoH çözücülerine geç. Mevcut DNS'i ilk seferde yedekle ki geri dönülebilsin.
+            svc=$(primary_service) || { echo "ag servisi bulunamadi" >&2; exit 1; }
+            if [ ! -f "$DNS_BACKUP" ]; then
+                cur=$(networksetup -getdnsservers "$svc" 2>/dev/null || true)
+                if printf '%s' "$cur" | grep -qiE "aren't any|there are no"; then
+                    echo "EMPTY" > "$DNS_BACKUP"
+                else
+                    printf '%s\\n' "$cur" > "$DNS_BACKUP"
+                fi
+            fi
+            networksetup -setdnsservers "$svc" $CLEAN_DNS
+            flush_dns
+            ;;
+        reset-dns)
+            # Yedekten eski DNS'i geri yükle (yoksa DHCP'ye bırak). Sadece biz değiştirdiysek çağrılır.
+            svc=$(primary_service) || { echo "ag servisi bulunamadi" >&2; exit 1; }
+            if [ -f "$DNS_BACKUP" ]; then
+                b=$(cat "$DNS_BACKUP")
+                if [ "$b" = "EMPTY" ] || [ -z "$b" ]; then
+                    networksetup -setdnsservers "$svc" "Empty"
+                else
+                    networksetup -setdnsservers "$svc" $b
+                fi
+                rm -f "$DNS_BACKUP"
+            else
+                networksetup -setdnsservers "$svc" "Empty"
+            fi
+            flush_dns
             ;;
         noop)
             exit 0
@@ -749,6 +871,75 @@ private final class ZapretManager: ObservableObject {
             )
             return Int(output?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 0
         }.value
+    }
+
+    // MARK: - DNS zehirlenmesi tespiti ve temiz DNS
+
+    /// Sistem çözücüsünün sahte cevap verip vermediğini belirler. Türkiye'de Discord gibi alanlar
+    /// DPI ile değil **DNS zehirlenmesiyle** engellenir; tpws bunu çözemez (yanlış IP'ye gidilir).
+    /// Sistem çözümü ile güvenilir DoH çözümünün ortak IP'si yoksa → zehirli. İnternet yoksa → false.
+    nonisolated static func detectDnsPoisoning() async -> Bool {
+        await Task.detached {
+            let system = resolveSystemIPs(CleanDNS.probeHost)
+            let trusted = resolveDoHIPs(CleanDNS.probeHost)
+            guard !trusted.isEmpty else { return false }   // güvenilir referans yok → karar verme
+            guard !system.isEmpty else { return true }      // sistem hiç çözemiyor → engelli say
+            return system.isDisjoint(with: trusted)         // ortak IP yok → sistem sahte cevap veriyor
+        }.value
+    }
+
+    /// Sistem çözücüsüyle (varsayılan resolver) A kayıtlarını çözer.
+    nonisolated private static func resolveSystemIPs(_ host: String) -> Set<String> {
+        let out = (try? runProcess("/usr/bin/dig",
+                                   arguments: ["+short", "+time=4", "+tries=1", "A", host])) ?? ""
+        return ipv4Set(from: out)
+    }
+
+    /// DoH üzerinden (IP-literal, DNS bootstrap gerektirmeden) A kayıtlarını çözer — hijack'e dayanıklı referans.
+    nonisolated private static func resolveDoHIPs(_ host: String) -> Set<String> {
+        let out = (try? runProcess("/usr/bin/curl", arguments: [
+            "-s", "--max-time", "8",
+            "\(CleanDNS.dohQuery)?name=\(host)&type=A",
+            "-H", "accept: application/dns-json"
+        ])) ?? ""
+        return ipv4Set(from: out)
+    }
+
+    /// Serbest metinden (dig çıktısı ya da DNS-JSON gövdesi) IPv4 adreslerini ayıklar.
+    nonisolated private static func ipv4Set(from text: String) -> Set<String> {
+        guard let re = try? NSRegularExpression(pattern: #"\b(?:\d{1,3}\.){3}\d{1,3}\b"#) else { return [] }
+        let ns = text as NSString
+        return Set(re.matches(in: text, range: NSRange(location: 0, length: ns.length))
+            .map { ns.substring(with: $0.range) })
+    }
+
+    /// Birincil ağ servisinde temiz DNS'imizin (DoH çözücüleri) aktif olup olmadığını okur. Ayrıcalık gerektirmez.
+    nonisolated private static func cleanDnsActive() -> Bool {
+        guard let svc = primaryNetworkService(),
+              let out = try? runProcess("/usr/sbin/networksetup", arguments: ["-getdnsservers", svc])
+        else { return false }
+        return out.contains(CleanDNS.servers[0])
+    }
+
+    /// Varsayılan rotanın arayüzünden birincil ağ servisinin adını (ör. "Wi-Fi") bulur.
+    nonisolated private static func primaryNetworkService() -> String? {
+        guard let route = try? runProcess("/sbin/route", arguments: ["-n", "get", "default"]),
+              let dev = route.split(whereSeparator: \ .isNewline)
+                .first(where: { $0.contains("interface:") })?
+                .split(separator: ":").last?
+                .trimmingCharacters(in: .whitespaces),
+              let order = try? runProcess("/usr/sbin/networksetup", arguments: ["-listnetworkserviceorder"])
+        else { return nil }
+        var lastName: String?
+        for raw in order.split(whereSeparator: \ .isNewline) {
+            let line = String(raw)
+            if let r = line.range(of: #"^\(\d+\)\s+"#, options: .regularExpression) {
+                lastName = String(line[r.upperBound...])
+            } else if line.contains("Device: \(dev))") {
+                return lastName
+            }
+        }
+        return nil
     }
 
     nonisolated private static func runProcess(_ path: String, arguments: [String]) throws -> String {
@@ -966,6 +1157,7 @@ private struct ContentView: View {
         }
         .frame(minWidth: 780, minHeight: 600)
         .preferredColorScheme(.dark)
+        .task { await manager.refreshDnsState() }
         .confirmationDialog(L("Zapret tamamen kaldırılsın mı?", "Remove Zapret completely?"),
                             isPresented: $confirmUninstall, titleVisibility: .visible) {
             Button(L("Kaldır", "Remove"), role: .destructive) { manager.uninstall() }
@@ -1003,7 +1195,7 @@ private struct ContentView: View {
                     Text("ZAPRET")
                         .font(.system(size: 19, weight: .heavy)).tracking(4)
                         .foregroundStyle(Theme.textHi)
-                    Text("MANAGER · v0.2")
+                    Text("MANAGER · v\(AppInfo.version)")
                         .font(.system(size: 10, weight: .semibold)).tracking(3)
                         .foregroundStyle(Theme.textLo)
                 }
@@ -1104,6 +1296,7 @@ private struct ContentView: View {
         ScrollView {
             VStack(spacing: 16) {
                 domainsCard
+                dnsCard
                 diagnosticsCard
             }
             .padding(24)
@@ -1135,6 +1328,60 @@ private struct ContentView: View {
                     Text(L("Kaydet ve Uygula", "Save & Apply"))
                 }
                 .buttonStyle(PrimaryButtonStyle(tint: Theme.accent, fg: .white, fullWidth: false))
+            }
+        }
+        .disabled(manager.isBusy)
+        .opacity(manager.isBusy ? 0.7 : 1)
+    }
+
+    private var dnsStatusText: String {
+        if manager.dnsManaged {
+            return L("Temiz DNS aktif (1.1.1.1 · 8.8.8.8)", "Clean DNS active (1.1.1.1 · 8.8.8.8)")
+        }
+        switch manager.dnsPoisoned {
+        case .some(true):  return L("Sistem DNS'i zehirli", "System DNS is poisoned")
+        case .some(false): return L("Sistem DNS'i temiz", "System DNS is clean")
+        case .none:        return L("DNS durumu bilinmiyor", "DNS status unknown")
+        }
+    }
+    private var dnsStatusColor: Color {
+        if manager.dnsManaged { return Theme.active }
+        switch manager.dnsPoisoned {
+        case .some(true):  return Theme.warn
+        case .some(false): return Theme.active
+        case .none:        return Theme.textLo
+        }
+    }
+
+    private var dnsCard: some View {
+        Card(title: L("DNS", "DNS"), systemImage: "network") {
+            Text(L("Bazı siteler (ör. Discord) Türkiye'de DPI ile değil DNS ile engellenir. Bunu zapret değil, temiz DNS çözer.",
+                   "Some sites (e.g. Discord) are blocked via DNS, not DPI. That needs clean DNS, not zapret."))
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.textLo)
+
+            HStack(spacing: 10) {
+                Circle().fill(dnsStatusColor).frame(width: 8, height: 8)
+                Text(dnsStatusText)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Theme.textHi)
+                Spacer()
+            }
+            .padding(.vertical, 9)
+            .padding(.horizontal, 12)
+            .background(Theme.ink, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+
+            HStack {
+                if manager.dnsManaged {
+                    ChipButton(title: L("Sistem DNS'ine Dön", "Revert to System DNS"),
+                               systemImage: "arrow.uturn.backward", action: manager.restoreSystemDNS)
+                } else {
+                    Button(action: manager.useCleanDNS) {
+                        Text(L("Temiz DNS'e Geç", "Switch to Clean DNS"))
+                    }
+                    .buttonStyle(PrimaryButtonStyle(tint: Theme.accent, fg: .white, fullWidth: false))
+                }
+                Spacer()
             }
         }
         .disabled(manager.isBusy)

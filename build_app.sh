@@ -27,8 +27,8 @@ plutil -insert CFBundleIdentifier -string "com.zapret.manager" "$CONTENTS/Info.p
 plutil -insert CFBundleExecutable -string "ZapretMac" "$CONTENTS/Info.plist"
 plutil -insert CFBundleIconFile -string "AppIcon" "$CONTENTS/Info.plist"
 plutil -insert CFBundlePackageType -string "APPL" "$CONTENTS/Info.plist"
-plutil -insert CFBundleShortVersionString -string "0.3.0" "$CONTENTS/Info.plist"
-plutil -insert CFBundleVersion -string "5" "$CONTENTS/Info.plist"
+plutil -insert CFBundleShortVersionString -string "0.4.0" "$CONTENTS/Info.plist"
+plutil -insert CFBundleVersion -string "6" "$CONTENTS/Info.plist"
 plutil -insert LSMinimumSystemVersion -string "14.0" "$CONTENTS/Info.plist"
 plutil -insert NSHighResolutionCapable -bool true "$CONTENTS/Info.plist"
 

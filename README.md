@@ -11,7 +11,8 @@ A native macOS app for installing and managing [Zapret](https://github.com/bol-v
 - **Password-free control.** After a single administrator approval at install time, starting, stopping, and saving no longer prompt for your password (see [How privileges work](#how-privileges-work)).
 - **Self-healing.** A lightweight watchdog restarts `tpws` automatically if it ever crashes, so your connection is never left half-broken (see [Resilience](#resilience)).
 - **Domain list editor.** Edit the list of domains to route through Zapret. Every save is backed up with a timestamp, and there is a built-in Discord profile to get started quickly.
-- **Connection tests.** Check reachability of Discord, OpenAI, Anthropic, and GitHub from inside the app.
+- **DNS-block bypass.** Some sites (e.g. Discord in Türkiye) are blocked by ISP DNS poisoning, not DPI — a case `tpws` cannot fix. The app detects poisoned DNS and can switch your connection to clean DoH-capable resolvers (1.1.1.1 / 8.8.8.8) in one click, restoring the original setting on revert or uninstall (see [DNS-based blocks](#dns-based-blocks)).
+- **Connection tests.** Check reachability of Discord, OpenAI, Anthropic, and GitHub from inside the app — with a dedicated DNS row that tells you whether a failure is DNS- or DPI-based.
 - **Clean uninstall.** Removes everything it installed, restoring your system to its original state.
 - **Bilingual.** English and Turkish, auto-selected from your system language with a one-tap switch in the app.
 
@@ -46,9 +47,15 @@ This is a deliberate trade-off: anyone who can run the app on this Mac can run t
 
 If `tpws` stops unexpectedly — a crash, or coming back from sleep — the leftover PF redirect would otherwise send all HTTPS traffic to a process that is no longer there, cutting off your connection. To prevent this, a watchdog `LaunchDaemon` (`zapret-watchdog`) checks `tpws` every ~10 seconds and restarts it whenever protection is supposed to be on but the process is gone. If you stopped protection yourself, the watchdog leaves it alone.
 
+### DNS-based blocks
+
+Not every block is a DPI block. In Türkiye, for example, Discord is blocked by **DNS poisoning**: the ISP's resolver answers `discord.com` with a sinkhole IP (e.g. `195.175.254.2`) instead of Discord's real Cloudflare addresses, so the connection never reaches Discord at all. `tpws` only manipulates the TLS handshake of connections that are *already* heading to the right server — it cannot fix a poisoned lookup, so no bypass strategy will ever unblock a DNS-blocked site.
+
+Zapret Manager detects this by comparing your system resolver's answer for a known-blocked domain against a trusted DNS-over-HTTPS answer (queried over an IP literal so it can't itself be poisoned). If they disagree, your DNS is poisoned. The app then offers a one-click switch to clean resolvers (`1.1.1.1`, `1.0.0.1`, `8.8.8.8`, `8.8.4.4`) on your primary network service, backing up your previous DNS so **Revert to System DNS** and uninstall restore exactly what you had. During install, if poisoning is detected, clean DNS is enabled automatically.
+
 ### Uninstall
 
-The **Uninstall Zapret** button in the app removes everything: `/opt/zapret`, the auto-start `LaunchDaemon`, the watchdog, and the `sudoers` rule. It unapplies the PF firewall first, so your connection is never left in a broken state.
+The **Uninstall Zapret** button in the app removes everything: `/opt/zapret`, the auto-start `LaunchDaemon`, the watchdog, and the `sudoers` rule. It unapplies the PF firewall first, so your connection is never left in a broken state. If the app changed your DNS, it restores your original resolver before removing its files.
 
 ## Building from source
 
@@ -63,4 +70,4 @@ Requires the Swift toolchain (Xcode or Xcode Command Line Tools).
 
 ## Project status
 
-Version 0.3.0 supports auto-tuned install, uninstall, persistent auto-start, password-free control, automatic recovery, and a bilingual (English/Turkish) interface. For broad public distribution, an in-app updater plus a Developer ID signature and notarization would remove the first-launch security prompt — these are not yet included.
+Version 0.4.0 supports auto-tuned install, uninstall, persistent auto-start, password-free control, automatic recovery, DNS-poisoning detection with one-click clean DNS, and a bilingual (English/Turkish) interface. For broad public distribution, an in-app updater plus a Developer ID signature and notarization would remove the first-launch security prompt — these are not yet included.
